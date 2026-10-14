@@ -1,0 +1,46 @@
+"""Stage 0: the ground-truth dataset for one dev seed is student-equal and pose-aligned."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "source" / "mapping"))
+record_gt = pytest.importorskip("record_gt")
+sim = pytest.importorskip("vis_nav_sim")
+
+SEED = json.loads(record_gt.SEEDS.read_text())["dev"][0]
+
+
+@pytest.fixture(scope="module")
+def dataset():
+    path = record_gt.gt_dir(SEED)
+    if not (path / "gt.json").exists():
+        pytest.skip("run `uv run source/mapping/record_gt.py` first")
+    return path
+
+
+def test_seeds_are_disjoint_and_big_enough():
+    cfg = json.loads(record_gt.SEEDS.read_text())
+    assert len(cfg["dev"]) >= 3 and len(cfg["test"]) >= 3
+    assert not set(cfg["dev"]) & set(cfg["test"])
+
+
+def test_poses_align_with_records(dataset):
+    poses = record_gt.load_poses(dataset)
+    assert len(poses) == record_gt.ROUTES
+    for i, p in enumerate(poses):
+        info = json.loads((dataset / f"traj_{i}" / "data_info.json").read_text())
+        assert p.shape == (len(info), 3)
+        assert np.all(np.abs(p[:, 2]) < 100)
+
+
+def test_pose_alignment_and_student_equality(dataset):
+    textures = sim.Textures.find(download=False)
+    assert record_gt.check_pose_alignment(SEED, dataset, textures)["max"] < 2.0
+    r = record_gt.check_matches_student(SEED, dataset, textures)
+    assert r["differ"] == []
