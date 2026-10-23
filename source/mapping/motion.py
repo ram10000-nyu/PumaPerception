@@ -162,6 +162,28 @@ class GroupPrior:
             inside = inside | (self.collision.mahalanobis2(x) <= chi2)
         return inside
 
+    def scaled(self, s_trans: float, s_rot: float) -> GroupPrior:
+        """The prior of a robot whose translations are ``s_trans`` and whose rotations are
+        ``s_rot`` times those it was fitted on (stage 4b self-calibration): the motion ``D x``
+        with ``D = diag(s_trans, s_trans, s_rot)``. Means and covariances transform, the density
+        thresholds shift by ``log |D|``. The collision component is a wall event, not a motion
+        scale, and stays as it is."""
+        d = np.array([s_trans, s_trans, s_rot])
+        shift = float(np.log(d).sum())
+        return GroupPrior(
+            self.n,
+            self.weights,
+            self.means * d,
+            self.covs * np.outer(d, d),
+            self.mean * d,
+            self.cov * np.outer(d, d),
+            self.inflation,
+            self.threshold - shift,
+            self.source,
+            self.collision,
+            None if self.threshold99 is None else self.threshold99 - shift,
+        )
+
     def to_json(self) -> dict:
         extra = {}
         if self.collision is not None:
@@ -299,6 +321,18 @@ class MotionPrior:
             for g, mask in groups:
                 g.threshold99 = float(np.percentile(g.logpdf(inc[mask]), 1))
         return summary
+
+    def scaled(self, scales: dict[str, tuple[float, float]]) -> MotionPrior:
+        """A copy with every group of label ``L`` scaled by ``scales[L] = (s_trans, s_rot)``."""
+
+        def one(label: str, g: GroupPrior) -> GroupPrior:
+            return g.scaled(*scales[label]) if label in scales else g
+
+        return MotionPrior(
+            {k: one(k, g) for k, g in self.by_label.items()},
+            {k: one(k.split(">")[1], g) for k, g in self.by_pair.items()},
+            {**self.meta, "scales": {k: list(v) for k, v in scales.items()}},
+        )
 
     def get(self, label: str, prev: str | None = None) -> GroupPrior:
         if prev is not None and f"{prev}>{label}" in self.by_pair:

@@ -44,3 +44,21 @@ def test_pose_alignment_and_student_equality(dataset):
     assert record_gt.check_pose_alignment(SEED, dataset, textures)["max"] < 2.0
     r = record_gt.check_matches_student(SEED, dataset, textures)
     assert r["differ"] == []
+
+
+def test_holdout_seeds_are_disjoint_from_dev_and_test():
+    cfg = json.loads(record_gt.SEEDS.read_text())
+    assert len(cfg["holdout"]) >= 5
+    assert not set(cfg["holdout"]) & (set(cfg["dev"]) | set(cfg["test"]))
+
+
+def test_holdout_is_refused_without_final(monkeypatch):
+    monkeypatch.setattr(record_gt, "_FINAL", False)
+    seed = record_gt.holdout_seeds()[0]
+    for prefix in ("gt", "gt4"):
+        with pytest.raises(record_gt.HoldoutError):
+            record_gt.gt_dir(seed, prefix=prefix)
+    # dev and test seeds are unaffected
+    assert record_gt.gt_dir(SEED).name == f"gt-{SEED}"
+    monkeypatch.setattr(record_gt, "_FINAL", True)
+    assert record_gt.gt_dir(seed).name == f"gt-{seed}"

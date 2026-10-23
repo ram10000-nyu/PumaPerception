@@ -80,6 +80,8 @@ class DriveResult:
     reanchored: np.ndarray | None = None  # (n,) bool: the heading was re-anchored at this frame
 
 
+SYMMETRIC_ICP = True  # stage 4b: forward and reverse ICP averaged (no forward-scale bias)
+WALL_TWO_SCANS = True  # stage 4b: feature depth in frame k from its own scan, not the row ratio
 AGREE_CHI2 = 15.0  # two vision measurements agree if their difference is within this (3 dof)
 
 
@@ -163,7 +165,8 @@ def run_drive(inp: DriveInputs, prior: M.MotionPrior, variant: str = "C") -> Dri
         if k > 0 and pts_prev is not None:
             cands = []  # vision measurements of the increment: (name, Measurement)
             init = np.array([mu_p[0], mu_p[1], theta0])
-            m = vo.icp(pts_prev, pts, init)
+            icp_fn = vo.icp_symmetric if SYMMETRIC_ICP else vo.icp
+            m = icp_fn(pts_prev, pts, init)
             if m is not None:
                 cands.append(("icp", m))
                 if np.isfinite(inp.psi[k]):
@@ -172,7 +175,15 @@ def run_drive(inp: DriveInputs, prior: M.MotionPrior, variant: str = "C") -> Dri
                     u = np.array([np.cos(w), np.sin(w)])
                     sig_along[k] = float(np.sqrt(u @ m.cov[:2, :2] @ u))
             if inp.matches is not None:
-                wm = vo.wall_motion(inp.matches[k], pts_prev)
+                wm = vo.wall_motion(
+                    inp.matches[k], pts_prev, scan_cur=pts if WALL_TWO_SCANS else None
+                )
+                if wm is None and WALL_TWO_SCANS:
+                    # too few features with a scan depth in both frames (often an in-place
+                    # turn): the row-ratio fit, biased about -3 % forward, beats no measurement
+                    wm = vo.wall_motion(inp.matches[k], pts_prev)
+                    if wm is not None:
+                        wm.info["ratio_fallback"] = True
                 if wm is not None:
                     cands.append(("wall", wm))
             # independent rotation sources: the feature-match bearings, the headings

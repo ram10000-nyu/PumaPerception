@@ -180,3 +180,53 @@ def test_vp_rotation_unwraps_to_the_nearest_branch():
     d2, _ = vo.vp_rotation(10.0, -44.0, 0.3, 0.3, predicted=np.radians(-50.0))
     assert np.degrees(d2) == pytest.approx(-54.0, abs=1e-9)
     assert sig == pytest.approx(np.radians(np.hypot(0.3, 0.3)))
+
+
+def test_symmetric_icp_recovers_motion_and_agrees_with_forward_on_clean_data():
+    pose = (0.12, -0.02, 0.2)
+    target = wall_scan(CORNER)
+    source = wall_scan(to_frame(CORNER, pose))
+    init = np.array(pose) + [0.01, -0.01, 0.03]
+    m = vo.icp_symmetric(target, source, init)
+    assert m is not None
+    err = m.mean - np.array(pose)
+    assert np.hypot(err[0], err[1]) < 0.012 and abs(err[2]) < np.radians(0.8)
+    assert np.allclose(m.cov, vo.icp(target, source, init).cov)
+
+
+def test_symmetric_icp_falls_back_to_forward_when_reverse_fails(monkeypatch):
+    target, source = wall_scan(CORNER), wall_scan(to_frame(CORNER, (0.1, 0, 0)))
+    real = vo.icp
+    calls = []
+
+    def flaky(t, s, init, **kw):
+        calls.append(1)
+        return real(t, s, init, **kw) if len(calls) == 1 else None
+
+    monkeypatch.setattr(vo, "icp", flaky)
+    m = vo.icp_symmetric(target, source, np.array([0.1, 0, 0]))
+    assert m is not None and len(calls) == 2
+
+
+def test_wall_features_with_two_scans_use_the_second_scan_depth():
+    pose = (0.15, 0.0, 0.0)
+    prev = wall_scan([((1.0, -2.0), (1.0, 2.0))])
+    cur = wall_scan(to_frame([((1.0, -2.0), (1.0, 2.0))], pose))
+    a, b, _ = vo.feature_points(wall_matches(pose), prev, scan_cur=cur)
+    assert np.allclose(a[:, 0], 1.0, atol=2e-3)
+    assert np.allclose(b[:, 0], 0.85, atol=5e-3)
+    m = vo.wall_motion(wall_matches(pose), prev, scan_cur=cur)
+    assert m is not None and np.allclose(m.mean, pose, atol=5e-3)
+
+
+def test_two_scan_feature_depth_ignores_a_noisy_row_ratio():
+    # a keypoint row that is off by a pixel breaks the ratio depth but not the scan depth
+    pose = (0.15, 0.0, 0.0)
+    prev = wall_scan([((1.0, -2.0), (1.0, 2.0))])
+    cur = wall_scan(to_frame([((1.0, -2.0), (1.0, 2.0))], pose))
+    mt = wall_matches(pose)
+    mt[:, 3] += 1.0
+    _, b_ratio, _ = vo.feature_points(mt, prev)
+    _, b_scan, _ = vo.feature_points(mt, prev, scan_cur=cur)
+    assert np.abs(b_ratio[:, 0] - 0.85).max() > 0.05
+    assert np.allclose(b_scan[:, 0], 0.85, atol=5e-3)

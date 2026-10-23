@@ -166,7 +166,7 @@ def test_a_confidently_wrong_heading_is_rejected_not_followed():
 
 def test_pipeline_modules_do_not_touch_ground_truth():
     forbidden = re.compile(r"gt\.json|poses\.json|camera_fit|record_gt|vis_nav_sim|Scene|occupancy")
-    for name in ("vo.py", "odometry.py", "pipeline.py"):
+    for name in ("vo.py", "odometry.py", "pipeline.py", "calibration.py", "loops.py"):
         body = (SRC / name).read_text().split('"""', 2)[-1]
         code = "\n".join(ln for ln in body.splitlines() if not ln.strip().startswith("#"))
         assert not forbidden.search(code), name

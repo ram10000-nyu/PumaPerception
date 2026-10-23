@@ -4,6 +4,94 @@
 **End goal:** from the provided exploration trajectories, build a metric top-down (zenithal) occupancy map of the maze with wall-texture signatures, and place the goal pose on it.
 **Out of scope for this plan:** live localization during a run, path planning, autonomous control. Those come in a follow-up plan that consumes this map.
 
+## Revision 10 (2026-10-18): stages 7 and 8 done; stage 9 rewritten; seed discipline
+
+Stages 5b to 8 were implemented by the user's Claude session: `reports/stage_5b.md` to `reports/stage_8.md`. They are **accepted; do not rerun them.** Next stage to run: **stage 9**, as rewritten below. **Stage 10 (new, at the user's request):** press P in `my_agent.py` to locate the robot on the map with an in-place 360° spin and show a green circle there. It runs after stage 9 and is the only live-localization piece in this plan. Read the stage 7 and stage 8 status notes and the facts table first.
+
+**Seed discipline (the user's instruction; it overrides anything older in this plan):**
+- Tune and debug on the **dev seeds (7 to 10) only**.
+- **Ask the user before any test seed (21 to 25) is scored**, and score each stage on test only once, after freezing. `stage8.py` refuses test seeds without `--allow-test`; any new evaluation script must do the same.
+- The **holdout seeds (31 to 35)** are opened once, by `final_eval.py --final`, **after stage 9 passes and after the user confirms**. The user chose to move this final run from the end of stage 8 to the end of stage 9.
+- Do not open a fresh local seed for tuning either. A new maze is a test.
+- Never run on the server (it spends an attempt), and never download another challenge's exploration data, without asking the user.
+
+**Built ahead of stage 9 (by the user's Claude session).** Keep and extend these; do not rewrite them:
+
+| file | what |
+|---|---|
+| `source/mapping/build_map.py` | raw data → `map.npz`, resumable steps, `timing.json` (173 s per local maze on a 4-core VM) |
+| `source/mapping/slam.py` | stages 5b and 6 as pipeline functions of raw inputs |
+| `source/mapping/grid.py` | stage 7: occupancy, lattice and scale, snapping, collision geometry, configuration space, signatures |
+| `source/mapping/goal.py` | stage 8: `place(load_map(...), target.jpg or info.targets)` |
+| `source/mapping/final_eval.py` | the holdout run: `--final build <seed>`, then `--final score 31,32,33,34,35` |
+| `source/my_agent.py` | display-only agent (stage 9 task 5 below). Builds or loads the map in `__init__`, places the goal in `setup`, shows the map and goal in `panel()`, keyboard driving. One open bug: see task 5. |
+
+**New facts:**
+- the goal views come from a 0.160 m camera (stage 8);
+- the collision radius is about 0.12 m to the unextended wall centre lines (stage 7);
+- a post can be missing between two walls (stage 7).
+
+All three are in the facts table.
+
+## Revision 9 (2026-10-15): stage 5 accepted; texture adjacency (stage 5b)
+
+Stage 5 (`reports/stage_5.md`) is **accepted; do not rerun it.** Closures: precision 0.997 on `gt4` test (17 false of 6,594), relative-pose error median 2.1 mm / 0.22 deg. Two criteria were mis-specified and are restated (both pass): **frame recall** (revisiting frames that get at least one closure) >= 0.25 replaces pair recall (measured 0.34); **graph connectivity** (closures plus the spawn constraint connect all drives) replaces "every drive pair directly joined" (seed 23 drives 0 and 1 connect through drive 2).
+
+Key finding: the ~200 wall textures repeat across a maze, so appearance alone cannot make closures; stage 5 gates them against the odometry (0.5 m, 10 deg). Closures are therefore a local refinement that depends on drift staying under about 0.4 m. The 17 false closures are aliases 0.4 to 0.6 m away (the same texture arrangement one or two cells along a corridor).
+
+| Where | Change |
+|---|---|
+| Stage 5 | Accepted; criteria restated as above. |
+| **Stage 5b (new)** | **Texture adjacency**: an ordered pair of textures meeting at a wall is far more distinctive than one texture. Go/no-go measurement first, then boundary-verified closures. **Being implemented by the user's Claude session, not the coding agent: do not start it.** |
+| Stage 6 | Two-pass Mahalanobis gating, closure thinning, and the real stage 5 aliases as the robustness set. |
+| Stage 8 | Textures repeat: the texture term cannot identify a wall alone; geometry leads, and stage 5b boundary signatures (if they pass) identify the goal's surroundings. |
+| Stage 9 | The closure gate assumes drift under about 0.4 m; per-tick or biased challenge drives must be checked against that. |
+
+Stages 5b, 6, 7 and 8 are **done** (`reports/stage_5b.md` to `reports/stage_8.md`). Next stage to run: **stage 9** (challenge data). **The final holdout evaluation is deferred until after stage 9** (user's decision, 2026-10-18: spend the holdout once, on the pipeline including the challenge adapter); its script is ready (`final_eval.py --final`). **Seed discipline (user's instruction):** develop on dev seeds only, and ask the user before any test seed is scored. Earlier note: stage 8 was to run next (goal placement; read the stage 7 status notes first). Earlier note: stage 7 was to run next (task 0, then lattice scale calibration). Earlier note: stage 6 was to run, using the union closures (`stage5b.py` rules: gate without contradiction, or boundary-verified) and the stage 5b notes on gate-free boundary closures.
+
+---
+
+## Revision 8 (2026-10-15): stage 4b accepted; per-tick challenge data
+
+Stage 4b (`reports/stage_4b.md`) is **accepted; do not rerun it.** Holdout seeds 31 to 35 are recorded and guarded. The forward bias was traced (ICP: noise through a one-directional fit, fixed by symmetric ICP; wall features: the row-ratio depth, fixed by two-scan depth). Odometry on `gt4` test improved to ATE median 0.094 m, 10-frame drift 0.79 / 4.64 %. Per-drive prior self-calibration recovers injected biases (11 of 12 scales within 1 %).
+
+Its three failed criteria are settled as follows:
+- **Straight-segment ratio -0.64 %** (CI excludes 0): a real residual, about 2 cm over 3 m, inside the stage 6 budget. **Accepted and recorded**; re-measured in stage 6.
+- **Similarity scale per drive (10 of 15 within 1 %)**: the metric absorbs drift-induced shape distortion as scale. **Moved to stage 6**, measured on loop-closed trajectories.
+- **Turn scale within 1 % of 1**: the true turn scale of those drives is itself about 0.99. **Restated:** fitted scale within 1 % of each drive's *true* scale (which it meets to about 0.5 %).
+
+Two findings change the plan:
+1. **The challenge download `ab7efaeb1abf` is one frame per tick**, not one per five. Measured from vision: 0.03 m and 3.5 deg per frame; the label repeats 80 % of the time (45 % locally). The stage 1 prior, the collision statistics and every per-frame threshold assume 5-tick spacing. Stage 9 gets a data adapter (task 0b).
+2. `Simulator.record` draws a **separate motion bias per route**; the server's drives probably do too (vision suggests forward 0.96 to 1.05 per drive). Calibration stays per drive.
+
+| Where | Change |
+|---|---|
+| Facts | Per-tick challenge data, per-route bias, holdout seeds 31 to 35, stage 4b fixes. |
+| Stage 4b | Status: accepted; criteria settled as above. |
+| Stage 6 | Gains the similarity-scale and straight-segment checks, on loop-closed trajectories. |
+| Stage 8 | The `--final` command-line flag must be wired before the final holdout run. |
+| Stage 9 | New task 0b: frame-rate detection and a per-tick to 5-tick adapter with exact window composition; check a second download. |
+
+Next stage to run: **stage 5**.
+
+---
+
+## Revision 7 (2026-10-15): stage 4 results; holdout seeds; stage 4b
+
+Stage 4 (`reports/stage_4.md`) produced per-drive trajectories from images with ATE median 0.12 m and worst heading RMS 0.83 deg on `gt4` test (labels alone: 3.5 to 4.6 m), all 63 collision events on the right branch. It did **not** pass cleanly: path length 1.1 % short (`gt4`), and one heading wrong by 3.1 deg (`gt4`) / 6.2 deg (`gt`) got through the gate. The report also states that the **test seeds were used to find and fix failures** in stage 4 (and two disclosed adjustments in stage 3b), so test-seed numbers are now optimistic.
+
+What changed in revision 7:
+
+| Where | Change |
+|---|---|
+| Rule 4 | **Holdout seeds** added: recorded once, never opened until the end of stage 8. Test seeds keep their working role. |
+| Stage 4 | Status: accepted pending stage 4b. Heading criterion restated to the actual danger. Scale criterion moved to stage 4b with a better metric. Deviations recorded (no floor homography, no parallel hypotheses). |
+| Stage 4b (new) | Record holdout seeds; diagnose and fix the forward scale bias; label-prior self-calibration on each dataset (against an unknown server `motion_bias`). |
+
+Next stage to run: **stage 4b**.
+
+---
+
 ## Revision 6 (2026-10-13): stage 3 accepted; server-like recordings; heading gating
 
 Stage 3 (`reports/stage_3.md`) is **complete and accepted; do not rerun it.** Fused heading on test seeds: 96.0 % of frames valid, median 0.21 deg, p95 0.75 deg, 99.95 % of valid frames under 3 deg; wall-top ranging lifts scan coverage from 0.80 to 0.95.
@@ -93,6 +181,7 @@ What changed:
    - dev seeds (tune anything you like): at least 3
    - test seeds (report only; never tune on them): at least 3
    Every acceptance number below is measured on the **test** seeds unless stated otherwise.
+   - **holdout seeds (revision 7):** 5 new seeds recorded in stage 4b as `gt-<seed>` and `gt4-<seed>`, listed in `seeds.json` under `holdout`. Nothing may read their frames, cues or results before the **final evaluation, moved to the end of stage 9 by the user in revision 10**, which runs the frozen pipeline on them exactly once and reports every stage's key metric (stages 2, 3, 3b, 4, 6, 7, 8) next to the test-seed numbers. No change to the pipeline is allowed after that run; if it reveals a failure, report it rather than fix and re-run. Rationale: the test seeds were used to find and fix failures in stages 3b and 4, so their numbers are no longer an unbiased estimate.
 5. **Every stage writes a report** `reports/stage_N.md`: what was built, a results table (metric, value, threshold, pass/fail), the plots listed under that stage, and open issues. Plots go in `reports/figures/`.
 6. **Units:** metres, radians in code, degrees in reports. Angles wrapped to (-pi, pi]. Poses are SE(2) `(x, y, theta)`.
 7. **Reproducibility:** every script takes `--seed` / `--data` arguments, fixes RNG seeds, and caches intermediate results under `cache/mapping/` with the stage name and a config hash in the filename (the baseline's caches are keyed only by frame count; do not repeat that mistake).
@@ -133,12 +222,17 @@ What changed:
 | Wall height | 0.30 m |
 | Camera height `h` | **0.2099 m** (+/- 0.001), = `height_offset` 0.15 + robot origin 0.06 |
 | Camera offset from rotation centre | axial 0.3 +/- 0.8 mm, lateral -0.8 +/- 0.9 mm: **treat as zero** (turning in place is pure rotation) |
-| Robot collision radius | about 0.08 m (closest approach of the robot centre to a wall plane) |
+| Goal-view camera | **The four goal views are rendered from h = 0.160 m** (exploration and live frames: 0.210 m), same intrinsics; counter-clockwise order (front, left, back, right = theta + k 90 deg). Measured on every local seed and on the challenge `target.jpg` (stage 8); `goal.py` measures h per goal image. |
+| Robot collision radius | **about 0.12 m to the collision segments** (centres of 4-adjacent wall cells, *without* the rendered 0.1 m free-end extension; an isolated cell is a point). True poses never come closer than 0.117 m to them on any of the 9 seeds (stage 7). Stage 0's 0.08 m was the closest approach to the *rendered* planes, reached at wall ends; along faces the closest approach is 0.117 m. |
 | Far plane | 5.0 m depth; nothing drawn beyond; background white (255, 255, 255), same as sky. Floor reaching the far plane ends at row 123.86 |
 | Floor palette (BGR) | blue tile (218, 181, 157) drifting to about (222, 195, 178) with distance (fog); grey tile (232, 232, 232). Stage 0's figures were on clean renders. *Revision 5:* on the JPEG frames the pipeline sees, floor = pixels within 5 levels of the line from (218, 181, 157) to (232, 232, 232); boundary found with a loose 30-level palette and a per-column step fit because of JPEG ringing next to dark walls (`segment.py`). Stage 0's trackability valid-column statistics used the old palette and are pessimistic |
 | Depth resolution | one boundary pixel = z^2 / (fy h): 0.05 m at 1 m, 0.21 m at 2 m, 0.47 m at 3 m, 0.83 m at 4 m |
 | Cue statistics (stage 0 audit, provisional detectors) | SIFT inliers vs previous frame: median about 30, 16.9 % of frames under 15 (mostly corridor views of dark walls). Valid boundary columns: median 0.54 to 0.58, 0.11 % of frames under 0.20. Vanishing point "found" on 88 % of frames but agreeing with true heading within 3 deg on only 39 % of those. Blind frames: 1 in 28,837 |
 | Challenge data | has `target.jpg` (4 views, 240 x 1280); no `gt.json` or `poses.json` |
+| **Challenge frame rate (stage 4b)** | `ab7efaeb1abf` is **one frame per tick** (vision: 0.029 to 0.031 m and 3.5 deg per frame; label repeats 80 % vs 45 % in 5-tick local data). Its labels are therefore exact per-tick actions. Unknown whether every server download is like this |
+| Motion bias per route (stage 4b) | `Simulator.record` draws a new bias per route (e.g. 0.44x to 1.29x forward speed within one biased recording); calibration is per drive (`calibration.py`). Server drives suggest per-drive forward scales 0.96 to 1.05 (vision, no ground truth) |
+| Holdout seeds | 31, 32, 33, 34, 35 (`seeds.json` `holdout`), recorded as `gt` and `gt4`, guarded by `record_gt.gt_dir` / `allow_final()`; unopened |
+| Odometry estimators (stage 4b) | symmetric ICP (forward and inverted reverse, averaged) and wall features with frame k's depth from its own scan (row ratio as veto and fallback); straight-pair bias +0.14 % (ICP) and -0.43 % (wall), fused straight-segment ratio -0.64 % |
 | Camera level | pitch < 0.3 deg; fitted cy = 120.000; stage 3: roll < 0.1 deg, no pitch trend |
 | **Anti-aliasing mismatch (stage 3)** | local recordings use `msaa=1` (simulator default, not overridden by `record_exploration_data`); the server renders with `msaa=4`. Challenge frames: 70 % of boundary columns have sub-pixel blends vs 13 % locally. Results on `msaa=4` re-renders are equal or better, so `msaa=1` numbers are conservative |
 | Heading (stage 3) | fused VP + scan-direction cue, valid only when the cues agree within 3 deg (`heading.py`). Scan cue is the stronger one (median 0.17 deg vs 0.39 deg). 4 % of frames are conflicts (no heading). **15 confidently wrong frames in about 32,000** (both cues agree, error up to 37 to 44 deg), all with estimated yaw mod 90 >= 31 deg, mostly in-place rotation in open areas: a valid heading is a measurement to gate, not ground truth |
@@ -327,6 +421,8 @@ What changed:
 
 ## Stage 4: Visual odometry with an action prior
 
+**Status (revision 7): accepted pending stage 4b.** Do not rerun stage 4 as a whole; stage 4b changes the estimators and re-checks the stage 4 criteria. Recorded deviations, accepted: (1) the floor homography was not built (scan ICP plus wall-feature motion constrain every direction on these data); (2) parallel filter hypotheses were not built (the single best hypothesis was right on all 88 events; 2 test events had a margin below 0.15; the `ambiguous` code path stays and is a known risk). Note for later stages: variant B (vision only) is about 2 x worse than C on `gt4`, so the action labels matter, mostly along corridors and around collisions.
+
 **Goal (revision 2):** per-drive trajectories driven by vision, with action labels only as a weak prior; and a measured answer to "how much do the actions add?".
 
 **Measurements available per consecutive frame pair (k, k+1):**
@@ -359,13 +455,45 @@ What changed:
 **Acceptance criteria** (test seeds, per drive, no loop closures)
 - [ ] Heading (variant C): RMS < 2 degrees.
 - [ ] Relative pose error over 10-frame windows (variant C): translation median < 3 % of the true distance travelled in the window, 95th percentile < 8 %; rotation median < 1 degree.
-- [ ] Scale (variant C): estimated total path length within 1 % of the true path length. Checks `h` end to end.
+- [ ] ~~Scale (variant C): estimated total path length within 1 % of the true path length.~~ Revision 7: moved to stage 4b with a better metric (summing step lengths counts noise on turns as path, which hides a forward bias).
 - [ ] **Collisions (revision 3):** every test-seed event with true rotation > 45 degrees (19 events) and every event > 30 degrees resolves to the correct 90 degree branch: heading error under 5 degrees five frames after the event. A single wrong branch fails the stage.
 - [ ] Variant C ATE lower than variant A on every test seed.
 - [ ] Filter consistency (variant C): NIS of the fused relative-motion update within the 95 % chi-square bound for 3 degrees of freedom (7.81) on at least 90 % of updates.
 - [ ] **Report, no threshold:** variant B vs C. If B's ATE is within 20 % of C's on every test seed, the pipeline does not depend on the action labels (robust to an unknown server `motion_bias`): state this conclusion explicitly. If B is much worse, say where (collisions, long corridors) with figures.
-- [ ] **Confidently wrong headings (revision 6):** none of the stage 3 frames that are valid but wrong by more than 3 deg (8 on `gt` test, 7 on `msaa4` re-renders; recompute the set on `gt4`) is accepted by the filter's heading gate, and the filtered heading error at those frames stays under 2 deg. Report the gate decision for each.
+- [ ] ~~Confidently wrong headings (revision 6): none accepted, filtered error < 2 deg.~~ Revision 7, restated to the actual danger: **no** stage 3 heading wrong by more than **10 deg** is accepted by the gate, and the filtered heading error at every confidently wrong frame stays under **3 deg on `gt4`** (report `gt` too). Stage 4 result: every frame wrong by > 10 deg rejected; the accepted ones were wrong by 3.1 and 6.2 deg; filtered error 1.81 deg on `gt4` (6.10 on `gt`, reported): **pass**.
 - [ ] Leakage test (rule 10) passes for the stage 4 pipeline.
+
+---
+
+## Stage 4b: Holdout seeds, scale bias, prior self-calibration (revision 7)
+
+**Status (revision 8): accepted. Do not rerun.** Residual straight-segment ratio -0.64 % accepted and re-measured in stage 6; the similarity-scale criterion moved to stage 6; the turn-scale criterion restated as "within 1 % of each drive's true scale" (met to about 0.5 %). Known gaps: the `--final` CLI flag is a hook only (wire it in stage 8); turn scale fitted about 0.5 % low (symmetric ICP under-measures rotation by about 0.7 %; a heading-cue rotation measurement would avoid it).
+
+**Goal:** an unbiased final exam, odometry without a forward scale bias, and a label prior that adapts to whatever motion bias a dataset has.
+
+**Tasks**
+0. **Holdout seeds.** Choose 5 new seeds (not 7 to 10, 21 to 25), record them as `gt-<seed>` and `gt4-<seed>` exactly like the others (with poses), check poses and labels are identical between the two, and add them to `seeds.json` under `holdout`. Do not open, plot or run anything on them after recording (rule 4). Add a test that the pipeline's evaluation scripts refuse holdout seeds unless called with an explicit `--final` flag.
+1. **Scale metric.** Replace "total path length" with two measures that do not count noise as path:
+    - the scale factor of a **similarity alignment** (Umeyama with scale) of each estimated drive to the true one;
+    - **straight-segment displacement**: for runs of at least 10 consecutive FORWARD pairs with true rotation under 2 deg in total, the ratio of estimated to true displacement (endpoint to endpoint).
+2. **Find the forward bias.** Stage 4 showed ICP about -1.2 % and wall-feature motion -1.7 % on straight pairs, while raw frontal-wall depth differences are unbiased (0.3 %) and `h` is right. Test at least these two hypotheses on dev seeds, each with a controlled experiment:
+    - *ICP prior shrinkage:* the weak Gaussian prior around ICP's initial guess pulls toward the label prior's mean, which for FORWARD (0.112 m, label-only; 0.149 m after FORWARD) can be short. Run ICP from the true motion, from zero and from the label prior; if the bias tracks the initial guess, weaken the prior or make it non-informative along the motion direction.
+    - *Errors-in-variables in the wall-feature depth:* `Z2 = Z1 (v1 - cy) / (v2 - cy)` divides by a noisy quantity, and E[1 / (a + noise)] > 1 / a, so Z2 is biased high and forward motion low; the rigid fit with noise in both point sets also shrinks scale (regression dilution). Try depths taken from each frame's own scan, and a total-least-squares or symmetric fit.
+    Report the bias of each estimator before and after on straight pairs (dev and test).
+3. **Label-prior self-calibration** (rule 10 compliant: images and labels only). On each dataset, fit a per-label scale (and offset) of the stage 1 prior from the pairs where ICP and wall features are both accepted and well constrained, by maximum likelihood or EM; apply it on that dataset. Validate: on local seeds the fitted scale must be close to 1 (no bias recorded locally); then inject a synthetic bias by re-recording **one dev seed** with `motion_bias` set (e.g. 0.9 x forward, 1.05 x turn) and show the calibration recovers it and variant C's ATE stays within 20 % of the unbiased case. Report the fitted scales on the challenge data `ab7efaeb1abf` (reported only; no ground truth there).
+4. Re-run variant C (and B, A for reference) on dev and test seeds with the fixed estimators and the calibrated prior; re-check every stage 4 criterion.
+
+**Deliverables**
+- `reports/stage_4b.md`, updated `vo.py` / `odometry.py` / `motion.py`, tests; `seeds.json` with `holdout`; holdout datasets on disk (unopened).
+- Figures: bias per estimator before / after on straight pairs; similarity-scale per drive; recovered vs injected bias.
+
+**Acceptance criteria** (test seeds; `gt4` primary, `gt` reported)
+- [ ] Holdout seeds recorded, poses and labels identical between `gt` and `gt4`, guarded by the `--final` test, and not opened.
+- [ ] Mechanism of the forward bias identified with a controlled experiment, or the report states which hypotheses were ruled out and how.
+- [ ] Similarity-alignment scale of variant C within **0.5 %** of 1 for the median drive and within **1 %** for every drive; straight-segment displacement ratio median within **0.5 %** of 1.
+- [ ] All stage 4 criteria (revision 7 wording) still pass on `gt4` test: heading RMS < 2 deg; 10-frame RPE median < 3 %, p95 < 8 %; collisions 63 / 63; C beats A; NIS >= 90 %; confidently wrong headings as restated; leakage.
+- [ ] Self-calibration: fitted scale within 1 % of 1 on every local seed; recovers an injected bias within 1 % on the biased dev seed, with variant C ATE within 20 % of the unbiased run. Fitted scales on the challenge data reported.
+- [ ] Any change made after looking at a test-seed result is disclosed, as in stages 3b and 4.
 
 ---
 
@@ -389,13 +517,36 @@ What changed:
 
 **Acceptance criteria**
 - [ ] Precision >= 0.98 at the chosen threshold (at most 1 false closure in 50).
-- [ ] At least one accepted closure between every pair of drives on every test seed (otherwise the drives cannot be joined).
-- [ ] Recall >= 0.25 of ground-truth revisit pairs.
+- [ ] ~~At least one accepted closure between every pair of drives on every test seed.~~ Revision 9: the closure graph plus the spawn constraint connects all drives on every test seed. Stage 5 result: **pass**.
+- [ ] ~~Recall >= 0.25 of ground-truth revisit pairs.~~ Revision 9: frame recall (revisiting frames with at least one closure) >= 0.25. Stage 5 result: 0.344 (`gt4`), 0.304 (`gt`): **pass**.
 - [ ] Relative-pose error of accepted closures: median < 0.08 m and < 2 degrees.
 
 ---
 
+## Stage 5b: Texture adjacency (revision 9)
+
+**Owner: the user's Claude session (not the coding agent).**
+
+**Status: done (`reports/stage_5b.md`).** Task 0: go (98.7 to 100 % of boundaries unique in their maze; every triple unique; three quarters of single faces have a twin). Pipeline `texture.py`: boundary-verified closures reach precision 0.998 on test **without the odometry gate** (2 false of 1,174, both 3.6 to 4.2 m off), frame recall 0.086; the union with the stage 5 gate keeps frame recall 0.344 at precision 0.998. The veto removes 4 of the 17 stage 5 aliases (13 have no face edge visible in one frame); those come from 3 places, each a 0.6 m (three-cell) shift. **Stage 6 uses the union closures, marks boundary closures gate-free, and keeps two-pass gating for the alias clusters and for the rare long-range boundary false closures.**
+
+**Idea.** One texture out of about 200 repeats several times per maze. An *ordered pair* of textures meeting along a wall (A|B) has about 40,000 possibilities, so with K boundaries per maze the expected number of repeated pairs is about K^2 / 80,000 (3 for K = 500, 12 for K = 1,000); a triple is effectively unique. A boundary is also a single physical point, so it pins position along a corridor where tiled textures alias.
+
+**Tasks**
+0. **Go/no-go measurement (evaluation only, rule 10).** From recorded frames at true poses and the true wall segments, rebuild every wall face's appearance and measure: how textures are laid out (per cell face, per run, stretched or tiled), how many texture boundaries a maze has, and how unique ordered pairs and triples are (within a maze and across seeds). **Go** if, on dev seeds, at least 90 % of boundaries carry a pair that occurs once in their maze.
+1. **Texture IDs (pipeline).** Per frame, cut each scan wall into faces, describe each visible face (colour statistics and a small rectified patch), and cluster into IDs across all frames of a dataset.
+2. **Boundaries.** Where the ID changes along one continuous wall (the scan rejects occlusion edges: depth jumps), record the ordered pair, the side, and the boundary's position in the robot frame.
+3. **Boundary-verified closures.** A stage 5 candidate is accepted without the odometry gate if both frames see the same ordered pair and the measured relative pose aligns the boundary positions within 5 cm.
+
+**Acceptance criteria** (dev chooses, test reports, `gt4` primary)
+- [ ] Task 0 measurement reported; go/no-go stated with the numbers.
+- [ ] If go: precision >= 0.98 **without** the odometry gate; none of the stage 5 alias closures (0.4 to 0.6 m) accepted; frame recall >= 0.25; leakage test (rule 10).
+- [ ] If no-go: the report says why, and stages 6 to 8 proceed with the stage 5 closures.
+
+---
+
 ## Stage 6: Pose-graph optimization
+
+**Status (revision 9): done by the user's Claude session (`reports/stage_6.md`).** Rigid-aligned ATE 0.013 to 0.027 m on test (stage 4b: 0.060 to 0.120 m), heading RMS <= 0.72 deg, all false closures (union set, 5 random, 17 real aliases) inactive, 4.5 to 10 s per seed. Additions beyond the plan: odometry covariance inflation (16x, chosen on dev), absolute heading priors every 10 frames (remove a global rotation about the spawn), IRLS on loop edges with first weights at the odometry. Scale misses marginally (median drive 0.55 % small, 14/15 drives within 1 %); **stage 7 should calibrate global scale from the detected 0.2 m lattice before snapping walls.** Optimised poses: `cache/mapping/<seed>/poses_optimized.json`.
 
 **Goal:** one globally consistent trajectory for all 3 drives.
 
@@ -403,7 +554,9 @@ What changed:
 1. Graph: nodes = every frame of every drive (or drive segment, if stage 4 split any); odometry edges from stage 4 variant C; loop-closure edges from stage 5.
 2. Spawn constraint (revision 2): stage 0 showed every drive starts at the known spawn (0.2, 2.6, 0) and the first saved frame is 5 ticks later. Add one fixed spawn node at that pose and connect each drive's first frame to it with an edge whose mean and covariance come from the stage 1 action prior for its label. This fixes the gauge and puts the map in the true world frame. Segments that do not start at the spawn float and are tied in only by loop closures.
 3. Solver: Levenberg-Marquardt on SE(2) with angle-wrapped residuals and a robust kernel (Cauchy or Huber; or switchable constraints). Use `scipy.optimize.least_squares` with a sparse Jacobian, or GTSAM if installable; document the choice.
-4. Robustness test: inject 5 random false closures (random frame pairs with random relative poses) and re-optimize.
+4. Robustness test: inject 5 random false closures (random frame pairs with random relative poses) and re-optimize. *Revision 9:* also inject the real stage 5 alias closures (the 17 false test closures, 0.4 to 0.6 m off), which are much harder than random ones.
+5. **Two-pass gating (revision 9).** Optimize once, then re-gate every closure with a Mahalanobis test against the optimized relative pose and its covariance (chi-square, 3 dof, 99 %), and optimize again. After the first pass the uncertainty is far smaller, so 0.4 m aliases fall outside the gate without a hand-tuned distance.
+6. **Closure thinning (revision 9).** Stage 5 makes about 1,300 closures per seed from consecutive frames; they are strongly correlated, and treating them as independent makes the graph overconfident. Keep about one closure per revisit cluster (e.g. per pair of 5-frame windows), or down-weight by cluster size; report the effect on ATE and NIS.
 
 **Deliverables**
 - `source/mapping/posegraph.py`, tests (toy square loops, see criteria).
@@ -413,13 +566,16 @@ What changed:
 **Acceptance criteria**
 - [ ] Toy-loop unit tests: (a) a 4-edge square with noise-free odometry and closure, started from a perturbed initial guess, converges to the true square within 1e-6; (b) the same square with 0.1 rad heading drift on one edge and an exact closure ends with the closure residual below 1e-3 and the error spread over all edges (no single edge carries more than half of it).
 - [ ] Optimized ATE (all drives jointly, after one rigid alignment) <= 0.08 m RMS on every test seed.
+- [ ] **Scale on loop-closed trajectories (revision 8, moved from stage 4b):** similarity-alignment scale within 0.5 % of 1 for the median drive and within 1 % for every drive; straight-segment ratio median reported with its confidence interval (stage 4b residual: -0.64 %). If the straight-segment shortfall still exceeds 0.5 %, report its effect on wall positions in the stage 7 map rather than calibrating it away.
 - [ ] Optimized heading RMS <= 2 degrees.
-- [ ] Robustness: with 5 injected false closures, ATE increases by no more than 25 %.
+- [ ] Robustness: with 5 injected false closures, ATE increases by no more than 25 %. *Revision 9:* the same with the real stage 5 aliases included, and after two-pass gating none of the 17 aliases remains active.
 - [ ] Runtime for the whole graph < 30 s per maze on a laptop CPU.
 
 ---
 
 ## Stage 7: Occupancy grid, grid regularization, wall textures
+
+**Status (revision 9): done by the user's Claude session (`reports/stage_7.md`).** All criteria pass on every test seed: IoU vs oracle 0.945 to 0.979; snapped wall cells 98.7 to 100 % recovered, 0 to 0.22 % false; lattice scale detected within 0.07 % and offset within 1.1 mm (Umeyama scale after correction 0.9998 to 1.0007, so stage 6's scale shortfall is removed); 100 % of true poses in the configuration space; `build_map.py` raw images to `map.npz` in 173 s. Regenerated oracle maps reach 0.93 to 0.98 IoU against the true layout (stage 2: 0.80 to 0.87); the drives see every wall, so the observable and full layouts coincide. Facts for later stages: (1) collision geometry and radius corrected (facts table); (2) in the true layouts a post can be missing between two walls (1.5 % of collinear, 2.4 % of perpendicular pairs; the gap is visible), and an isolated vertical edge cell renders as a horizontal 0.2 m piece; the snapping handles both; (3) wall signatures are stored per wall face (cell and side), not per segment: same-face distance between drives about 0.15, different faces about 0.8 (AUC 0.98), but 75 % of faces have a twin (stage 5b), so they confirm a pose hypothesis and cannot choose one alone; (4) pipeline modules: `grid.py`, `slam.py` (stages 5b and 6 as functions of raw inputs), `build_map.py` (resumable steps, `timing.json`).
 
 **Goal:** the top-down map itself.
 
@@ -429,7 +585,7 @@ What changed:
 2. Lattice detection: histogram occupied cells along the maze axes, estimate cell size L and offset; report them. **Walls lie on lines through cell centres** (stage 0: thin planes through wall-cell centres), so the lattice to detect is the set of cell-centre lines, and a snapped wall is a 0.2 m segment between two adjacent lattice points. Produce the snapped wall map (a set of such segments, plus the equivalent wall-cell grid) as a second output.
 3. Wall-texture signatures: for each lattice wall segment observed, store an HSV hue-saturation histogram (16x4 bins, Hellinger-normalized) and the ids of the frames that saw it.
 4. Rendering: `map.png` (grid + all three optimized trajectories + start points) and `map_snapped.png`. Draw walls as segments, not as filled 0.2 m squares (the stage 0 trajectory figures used squares, which misrepresents the free space).
-5. **Configuration-space map (revision 3):** free space for the robot centre = free cells farther than the robot's collision radius (0.08 m, stage 0) from any wall segment. Save it in `map.npz` for the follow-up planning plan, and check that every true pose on dev seeds lies in it (allowing 0.01 m).
+5. **Configuration-space map (revision 3; radius corrected in stage 7, see the facts table):** free space for the robot centre = free cells farther than the robot's collision radius from any collision segment. Save it in `map.npz` for the follow-up planning plan, and check that every true pose on dev seeds lies in it (allowing 0.01 m).
 
 **Deliverables**
 - `source/mapping/grid.py`, `source/mapping/build_map.py` (end-to-end CLI: `uv run source/mapping/build_map.py --data <dir>`), tests.
@@ -449,12 +605,14 @@ What changed:
 
 ## Stage 8: Goal placement on the map
 
+**Status (revision 9): done by the user's Claude session (`reports/stage_8.md`), except the final holdout run, deferred to after stage 9 by the user.** Test seeds (scored once, with the user's agreement, after freezing): 5 of 5 goals within 3 mm and 0.2 deg, confidence 0.31 to 0.38 (threshold 0.10 chosen on dev), 0.55 to 1.0 s per placement. The texture term is necessary: geometry alone places dev seed 10 4 m away, and on test seeds 21 and 25 a runner-up fits the walls almost as well as the goal. `final_eval.py` (`--final` wired to `record_gt.allow_final()`, tested) runs `build_map.py` and scores stages 2 to 8 on given seeds; checked on dev seed 7.
+
 **Goal:** goal pose `(x_g, y_g, theta_g)` in the map frame, from the 4 goal views.
 
 **Tasks**
 1. Virtual scan for each goal view (front, left, back, right); rotate by 0, 90, 180, 270 degrees and merge into one goal scan in the goal's frame.
 2. Global search: correlative scan matching over the free cells of the map, coarse-to-fine in `(x, y, theta)`, scored by a blurred likelihood field.
-3. Texture term: for the top-N geometric candidates, compare the hue-saturation histograms of the walls seen in the goal views with the map's wall signatures at the predicted walls; combine scores.
+3. Texture term (*revision 9: textures repeat across a maze, so this term only breaks ties between geometric candidates; if stage 5b passed, use its boundary signatures instead, which are near unique*): for the top-N geometric candidates, compare the hue-saturation histograms of the walls seen in the goal views with the map's wall signatures at the predicted walls; combine scores.
 4. Refine the winner with ICP. Output pose, a confidence (score margin between best and second-best candidate), and the top-3 candidates.
 5. Source of goal views: `target.jpg` from the exploration data (stage 0: present in challenge data too, 240 x 1280, view 0 = the heading to arrive with). Also expose a function that takes the 4 views at runtime (`info.targets`) and runs in < 2 s, as a fallback.
 6. The goal views overlap: the horizontal field of view is about 120 degrees, so adjacent views 90 degrees apart share about 30 degrees. Use the overlaps as a consistency check on the merged goal scan.
@@ -465,31 +623,176 @@ What changed:
 
 **Acceptance criteria**
 - [ ] Goal position error < 0.10 m and heading error < 10 degrees on at least 80 % of test seeds. Increase the number of test seeds to at least 5 for this stage if fewer were recorded.
+- [ ] **Final evaluation (revision 7; revision 8: first wire the `--final` command-line flag into the evaluation scripts, calling `record_gt.allow_final()`, with a test that the holdout seeds are still refused without it):** after this stage passes and the pipeline is frozen, run it once on the 5 holdout seeds (`--final`) and report every stage's key metric next to the test-seed numbers. No fixes after this run; failures are reported.
 - [ ] No high-confidence failures: every seed whose error exceeds those bounds has confidence below the threshold chosen on dev seeds.
 - [ ] Runtime < 2 s per goal placement given a built map.
 - [ ] Leakage test (rule 10) passes.
 
 ---
 
-## Stage 9: Challenge data run and agent display
+## Stage 9: Challenge data run, agent display, final holdout evaluation (rewritten in revision 10)
 
-**Goal:** apply the validated pipeline to real challenge data and show the map in the agent's viewer.
+**Goal:**
+1. Run the validated pipeline on real challenge data, which is one frame per tick.
+2. Have `my_agent.py` show the map and goal reliably.
+3. Run the one-time holdout evaluation.
+
+No live localization, planning or control: those belong to the follow-up plan.
+
+**Why an adapter.** Every frame-counted setting was tuned on frames 5 ticks apart: the motion prior, the collision thresholds, the closure exclusion window (10 frames), the thinning window (5 frames), heading priors every 10 frames, and the 16× odometry inflation. The challenge download `ab7efaeb1abf` is one frame per tick (stage 4b): the label repeats 80 % of the time, and the motion per frame is 0.029 to 0.031 m and 3.5°, i.e. 1 tick. On that data the stage 4b calibration hit its 0.3 floor.
+
+Keeping every 5th frame makes the data **identical in kind to the local recordings**, so nothing tuned needs to change. The ticks in between are not wasted: they give each kept frame its exact action composition.
 
 **Tasks**
-0. Leakage test first (rule 10): on a copy of every test seed's dataset with `gt.json` and all `poses.json` deleted, the full pipeline must produce outputs identical to the original runs. Also grep the pipeline modules for any import of `vis_nav_sim`, `camera_fit.Scene`, or reads of `gt.json` / `poses.json`; there must be none.
-1. Run `build_map.py` on the downloaded challenge exploration data (no ground truth; same parameters as frozen after stage 8).
-2. In `source/my_agent.py`, load the map in `__init__` (which runs before the server connection; a crash there costs no attempt) and show it via `panel()` with the goal pose marked. No control logic in this stage.
-3. Sanity checks without ground truth: loop-closure count per drive pair, final pose-graph cost, goal confidence; compare their ranges with the local test seeds.
+
+0. **Leakage and import check** (rule 10) for every new or changed pipeline module (`adapter.py`, `build_map.py`, `my_agent.py`'s map path):
+   - a static scan for `gt.json`, `poses.json`, `camera_fit`, `record_gt`, `vis_nav_sim`;
+   - an identical-output run on a copy without the truth files. `tests/mapping/test_grid.py` has the pattern.
+1. **Frame-rate detector** in `source/mapping/adapter.py` (pipeline): `ticks_per_frame(drive_dir) -> (k, evidence)`, from the data alone.
+   - **Evidence:**
+     - (a) the label-repeat rate (local 5-tick: 0.45; per tick: 0.80);
+     - (b) the median forward motion per FORWARD-labelled frame from consecutive-frame scan ICP (`vo.icp_symmetric`), divided by the 0.03 m tick;
+     - (c) the median absolute heading change per LEFT/RIGHT frame from the stage 3 compass, divided by the 3.44° tick.
+   - Take k = the rounded median of (b) and (c), and require (a) to agree. If they disagree, raise an error rather than guess.
+   - Record k and the evidence in `build_map.py`'s outputs.
+2. **Local per-tick recordings, for validation only.**
+   - Add `--capture-every N` to `record_gt.py` (default 5; this changes no existing recording). It writes `data/tick<N>-<seed>/` with `--msaa 4`.
+   - Record **dev seeds 7 and 8** at N = 1. These are the same mazes, routes and noise as `gt4-7` and `gt4-8`, so the frames must coincide.
+   - Find the offset: which per-tick frame equals which 5-tick frame. Byte-compare the JPEGs, and report the maximum pixel difference if they are not identical.
+3. **Subsampling** (`adapter.subsample(drive_dir, k, out_dir)`):
+   - keep frame 0 and every k-th frame after it, at the offset found in task 2;
+   - write `data_info.json` with `action` = the **last** tick's label (the stage 1 convention: a window's label is its last tick), plus a new field `composition` = counts of each action over the window's k ticks;
+   - copy or link the images.
+
+   Check:
+   - on `tick1-7` and `tick1-8`, the subsampled `data_info.json` actions equal `gt4-7` / `gt4-8` on 100 % of frames;
+   - the images are identical.
+4. **`build_map.py --ticks auto|N`** (default `auto`): detect the rate; if it isn't 5, subsample into the work directory and build from that. Write the detected rate to `adapter.json` in the output directory.
+
+   **Transparency check (dev only):** `build_map.py` on `tick1-7` must reproduce the `gt4-7` build:
+   - poses within 1 mm;
+   - snapped wall cells identical;
+   - goal within 1 cm.
+
+   If not, find out why before going on.
+5. **Agent (`my_agent.py`).**
+   - **5a. Fix the open bug first.** On `uv run source/my_agent.py --local 7` the user saw **no red arrow**, although `goal.place` on `data/local-7/target.jpg` with the same map gives (5.00, 0.40, 139°), confidence 0.29, i.e. reliable, which is the true goal. The difference must be in what the session hands `setup()`. Diagnose with this, then fix:
+     - compare `info.targets` from `vis_nav_sdk.local.local_session('local:7')` with `target.jpg`: shapes, dtype, `camera.color_order`, the mean absolute difference as is and with channels reversed;
+     - run `goal.place` on both.
+
+     Candidate causes:
+     - RGB instead of BGR;
+     - a different rendering of the live goal views;
+     - an exception swallowed in `setup()`;
+     - the arrow drawn orange because confidence < 0.10.
+
+     Also reset `self.status` in `setup()`: a pre-flight failure message can currently linger.
+   - **5b.** Replace the `five_tick_data()` name check with the task 1 detector. On challenge data, build through the adapter, so `--map` is no longer needed.
+   - **5c.** Draw the HUD goal line in the same colour as the arrow (red when reliable, orange when not).
+6. **Challenge run:** `build_map.py --data data/ab7efaeb1abf` (no ground truth; parameters frozen since stage 8), then `goal.place(..., target.jpg)`.
+7. **Sanity checks without ground truth.** Report each challenge value next to the dev-seed range and the test range already in reports 4b to 8; flag and explain any value outside them:
+   - detected rate and its evidence;
+   - per-drive calibrated scales (expected 0.9 to 1.1);
+   - closures per drive pair and by kind;
+   - closures dropped by the chi-square re-check;
+   - final graph cost per edge;
+   - lattice scale and strength;
+   - snapped wall cells (local mazes: 420 to 480) and whether the outer wall is closed;
+   - configuration-space cells;
+   - goal camera height (0.160);
+   - goal confidence and overlap residual;
+   - runtime.
+8. **Final holdout evaluation** (moved from stage 8 by the user). Only after tasks 0 to 7 pass, the pipeline is frozen, **and the user confirms**:
+   - run `python3 source/mapping/final_eval.py --final build <seed>` for 31 to 35;
+   - then `--final score 31,32,33,34,35`;
+   - report every stage's key metric next to the test-seed numbers.
+
+   No fixes after this run; failures are reported. Run it on `gt4` (server-like frames). The holdout recordings are 5-tick, so the adapter is exercised only through detection (k must come out 5).
 
 **Deliverables**
-- `reports/stage_9.md` with the challenge map, goal estimate and sanity-check table.
-- `my_agent.py` displaying the map (no attempt needs to be spent: verify with `--local`).
+- `source/mapping/adapter.py`; `record_gt.py --capture-every`; `build_map.py --ticks`; `my_agent.py` fixes; `tests/mapping/test_adapter.py` (detector on synthetic label streams, subsampling bookkeeping, the leakage tests).
+- `data/tick1-7`, `data/tick1-8` (dev only).
+- `reports/stage_9.md`, containing:
+  - adapter validation;
+  - the transparency check;
+  - the root cause of the arrow bug and its fix;
+  - the challenge map and goal (figure);
+  - the sanity-check table;
+  - the holdout table.
 
 **Acceptance criteria**
-- [ ] Leakage test and import check pass.
-- [ ] Pipeline runs end to end on challenge data with the frozen parameters, no manual edits.
-- [ ] Every sanity-check value lies within the range seen on local test seeds, or the report flags it and explains it.
-- [ ] `uv run source/my_agent.py --local <test seed>` shows the map and goal in the panel without errors.
+- [ ] Leakage and import checks pass for `adapter.py`, `build_map.py` and the agent's map path.
+- [ ] The detector returns 5 on every local 5-tick dataset it is run on (dev seeds; holdout through `final_eval`), 1 on `tick1-7`, `tick1-8` and `ab7efaeb1abf`, with evidence (a) to (c) reported.
+- [ ] Subsampled `tick1` data equals the native 5-tick data: labels on 100 % of frames; images identical, or the maximum difference is reported and explained.
+- [ ] Transparency: a `tick1-7` build reproduces the `gt4-7` build (poses ≤ 1 mm, same snapped cells, goal ≤ 1 cm).
+- [ ] `--local 7` (dev) shows the red arrow at the true goal, with the root cause of the earlier missing arrow stated. The user drives to it manually and checks in; report the score.
+- [ ] Challenge: end to end with no manual edits, < 5 min. Every sanity value is in range or flagged and explained.
+- [ ] Final holdout evaluation done once, with the user's confirmation, and reported without fixes.
+- [ ] Optional, only if everything above passes: a **composition prior** (motion given the window's exact action counts, fitted on `tick1-7`, `tick1-8`) used for subsampled data. Show calibration (95 % region covers 90 to 99 %) on a dev drive held out from the fit, and the ATE change of variant C. Adopt it only if it helps on dev, and mention it before the holdout run.
+
+---
+
+## Stage 10: Ping: locate the robot on the map on demand (revision 10)
+
+**Goal:** while driving with the keyboard in `my_agent.py`, pressing **P** locates the robot on the map from what the camera sees *now*. The panel then redraws with a **green circle** at the estimated position, plus a short tick for the heading. This is a deliberate, on-demand exception to "live localization is out of scope": no continuous tracking, no planning, no control.
+
+**Order and freezing.** Run this stage after stage 9, including its holdout run. It is additive: the frozen pipeline (stages 2 to 8) must behave identically, so the one change to `goal.py` comes with a byte-identical check (task 3). The holdout seeds are never used here.
+
+**Why a ping is a spin, not a single frame.**
+- A single 120° view is often ambiguous: corridors look alike, and stage 8 showed that even 2 of the 4 goal views failed once on dev.
+- Turning in place through 360° yields the same kind of panoramic scan the goal views give. `goal.place`, which needs every view of it to place well, then works almost unchanged.
+- The robot rotates about its camera (stage 0: offset zero), so the position does not move during the spin.
+- The cost is steps, not attempts: 360° / 3.44° per tick ≈ **105 ticks**, out of a 60,000-step budget.
+
+**Tasks**
+
+1. **The ping sweep** (`source/mapping/ping.py`, pipeline code):
+   - `start()` begins a sweep. While a sweep runs, the agent returns `(Action.LEFT, 1)` each step and passes every `obs.image` to `add(image)`. This is about 105 frames, one per tick.
+   - The sweep ends after the stage 3 compass, combined with the tick count (3.44° per LEFT tick), says the total turn is ≥ 360°. Use the tick count to unwrap the compass's modulo-90° heading.
+   - Collisions do not apply (an in-place turn), but stop and report if the compass and the tick count disagree by more than 10°.
+2. **Sweep → scan:**
+   - For each kept frame (every 3rd is plenty, about 35 frames), take its virtual scan (stage 2, **robot camera height 0.21 m**).
+   - Rotate it by the frame's heading relative to the first frame. Use the heading change from the compass (drift-free modulo 90°) unwrapped by the ticks, rather than the ticks alone, which carry motion noise.
+   - Merge into one scan in the frame of the first view. Keep each frame's image and its relative angle for the texture term.
+3. **Generalise `goal.py`** so that a scan's views can carry **any relative angles** (today `texture_score` assumes k × 90°). Add an angle per entry of `GoalScan.views` and use it in `texture_score`. Goal placement must give byte-identical results before and after this change: check it on the dev goals.
+4. **Localise:** `ping.locate(map, sweep) -> (pose of the first frame, confidence, top 3)`, through `goal.place` on the merged scan. The robot's pose at the end of the sweep is the first frame's pose plus the final relative heading.
+   - Reuse the stage 8 confidence rule.
+   - Choose `PING_CONF_MIN` on dev as stage 8 did: the margin that separates right from wrong on the dev evaluation in task 6. Do not assume the goal's 0.10.
+5. **Agent** (`my_agent.py`):
+   - **Keys.** `act()` reads `self.viewer.keys()` **once** per step and handles both the arrows and **"p"** (the pygame key name). `Viewer.keys()` clears the tap record, so calling it twice per step loses taps. Do not call `KeyboardAgent.act` after reading the keys yourself. Copy its few lines instead, and do not modify `keyboard_agent.py` (rule 2).
+   - **During a sweep,** ignore the arrows (escape still quits).
+   - **When the sweep ends,** locate and redraw the panel: a green filled circle at the estimate with a heading tick. If not reliable, draw a hollow green circle, write "NOT reliable" in the HUD, and show the runner-ups as small grey circles.
+   - **Keep the last 5 pings** as fading green circles, so the user sees the track.
+   - **HUD:** the ping state ("spinning 210/360°", then "located x, y, heading, confidence, 0.4 s"), and the ticks the ping spent.
+   - The map itself is not changed by a ping: the walls stay as built, and only the overlay updates.
+6. **Evaluation** (`source/mapping/stage10.py`, evaluation code, local simulator only):
+   - **Recording.** Record ping sweeps with true poses on **dev seeds 7 to 10**: at least 25 random free positions per seed, at least 0.15 m from walls, random initial headings, each a full 360° in-place sweep. Use `vis_nav_sim` directly, as `record_gt.py` does, with `msaa=4`. Save the frames and the true poses.
+   - **Placement metrics:** position and heading error of the pose at the end of the sweep, confidence, runtime.
+   - **Ablations:** a single frame (no spin), a half spin (180°), and no texture term. These show what each part buys.
+   - **Test seeds:** only once and **after asking the user**, same protocol, with a `--allow-test` guard.
+7. **The display, for real:** `uv run source/my_agent.py --local 7` (dev). Drive somewhere, press P, and check the green circle against where you are. The user does this run. Report what they saw, and the positions of 3 or more pings compared with the simulator's true pose. The local SDK does not report the pose, so read it from the recorded evaluation harness or a debug print in the local simulator session.
+
+**Deliverables**
+- `source/mapping/ping.py`; the `goal.py` generalisation; `my_agent.py` with P.
+- `source/mapping/stage10.py`; `tests/mapping/test_ping.py`:
+  - sweep bookkeeping on synthetic rotations;
+  - angle unwrapping;
+  - the 4-view case reproducing `goal.place` exactly;
+  - leakage.
+- `reports/stage_10.md`:
+  - error table per seed;
+  - confidence vs error plot;
+  - the ablations;
+  - a panel screenshot with pings.
+
+**Acceptance criteria**
+- [ ] Goal placement is unchanged by the `goal.py` generalisation: dev goals byte-identical.
+- [ ] Dev sweeps: ≥ 90 % within 0.10 m and 10°, and no high-confidence failures at the chosen `PING_CONF_MIN`.
+- [ ] Test sweeps, scored once with the user's agreement: ≥ 90 % within 0.10 m and 10°, no high-confidence failures.
+- [ ] Locating takes < 1 s of computation after the sweep (the sweep itself is about 105 ticks), and the panel updates in the same step.
+- [ ] A sweep that collides or whose compass and ticks disagree is reported in the HUD, not silently used.
+- [ ] Leakage (rule 10): `ping.py` and the agent's ping path use only images, labels and the map.
+- [ ] The user sees the green circle in the right place in `--local 7` on 3 or more pings.
 
 ---
 
@@ -503,7 +806,13 @@ What changed:
 | 2 | done | endpoint error median 2.8 mm, p95 23 mm; coverage 0.80 (0.95 with wall top) |
 | 3 | done | fused heading: 96.0 % valid, median 0.21 deg, p95 0.75 deg, 99.95 % of valid within 3 deg |
 | 3b | Collision component; collision detector | calibration still 0.90 to 0.99 with the component; detector recall 1.0 on > 45 deg events, >= 0.9 on > 30 deg, <= 1 % flagged |
-| 4 | Visual odometry (variant C) | heading RMS < 2 deg; 10-frame RPE median < 3 %; path length within 1 %; beats actions-only; every collision event on the correct branch; no confidently wrong heading accepted; passes on `gt4` and `gt` |
+| 4 | Visual odometry (variant C) | heading RMS < 2 deg; 10-frame RPE median < 3 %; beats actions-only; every collision event on the correct branch; no heading wrong by > 10 deg accepted; ATE median 0.12 m (`gt4`) |
+| 4b | done | symmetric ICP + two-scan wall depth; ATE median 0.094 m; 10-frame drift 0.79 / 4.64 %; straight-segment -0.64 % (accepted); per-drive calibration recovers injected bias; holdout seeds 31 to 35 |
+| 6 (rev 8) | Scale on loop-closed trajectories | similarity scale within 0.5 % (median) / 1 % (every drive); straight-segment ratio reported |
+| 9 (rev 8) | Challenge adapter | frame rate detected; subsample to 5 ticks with exact composition prior; validated locally; closure gate (drift < 0.4 m) checked |
+| 5 | done | precision 0.997, pose error 2.1 mm / 0.22 deg; frame recall 0.34; graph connected |
+| 5b (rev 9) | Texture adjacency | go/no-go: >= 90 % of boundaries unique in their maze; then precision >= 0.98 without odometry gate, no 0.4 to 0.6 m aliases |
+| 8+ | Final holdout evaluation | run once on the frozen pipeline; reported, no fixes |
 | 5 | Loop-closure precision | >= 0.98; >= 1 closure per drive pair |
 | 6 | Optimized ATE | <= 0.08 m RMS; heading <= 2 deg |
 | 7 | Map IoU vs oracle / true walls | >= 0.75 / >= 0.70 (1-cell tolerance); snapped segments >= 95 % recall, <= 5 % false; C-space holds 99.5 % of true poses |

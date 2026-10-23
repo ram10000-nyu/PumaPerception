@@ -138,9 +138,11 @@ def icp(
     iters: int = 30,
     dmax_start: float = 0.20,
     dmax_end: float = 0.05,
+    init_sigma: np.ndarray | None = None,
 ) -> Measurement | None:
     """Point-to-line ICP aligning ``source`` (frame k+1) to ``target`` (frame k): returns the
-    pose of frame k+1 in frame k. ``init`` is a first guess ``(dx, dy, dtheta)``."""
+    pose of frame k+1 in frame k. ``init`` is a first guess ``(dx, dy, dtheta)``; the weak
+    Gaussian prior around it has standard deviations ``init_sigma`` (default ``INIT_SIGMA``)."""
     has_n = np.isfinite(target.normal[:, 0])
     if has_n.sum() < 10 or len(source.xy) < 10:
         return None
@@ -182,7 +184,7 @@ def icp(
         # MAP step: a weak Gaussian prior around the initial guess keeps directions the scan
         # does not constrain (along a corridor) where they started instead of letting noise
         # throw them far away
-        P0inv = np.diag(1.0 / INIT_SIGMA**2)
+        P0inv = np.diag(1.0 / (INIT_SIGMA if init_sigma is None else np.asarray(init_sigma)) ** 2)
         step = -np.linalg.solve(H + P0inv, g + P0inv @ (pose - np.asarray(init)))
         pose = pose + step
         pose[2] = float(se2.wrap(pose[2]))
@@ -202,6 +204,28 @@ def icp(
     Hc = (Jw[inl]).T @ Jw[inl] / COV_SCALE
     cov = np.linalg.inv(Hc + np.diag([1.0 / COV_CAP, 1.0 / COV_CAP, 1.0 / (np.radians(30.0)) ** 2]))
     return Measurement(pose, cov, info)
+
+
+def icp_symmetric(
+    target: ScanPoints, source: ScanPoints, init, **kw
+) -> Measurement | None:
+    """``icp`` run in both directions and averaged. One run fits the lines of one scan to the
+    noisy points of the other, which shrinks the forward motion (regression dilution: -0.7 % on
+    straight pairs, stage 4b); the average of the forward run and the inverted reverse run
+    cancels the asymmetry (+0.2 % +/- 0.2) and halves the median rotation error. The
+    covariance and diagnostics are the forward run's. If the reverse run fails, the forward
+    result stands."""
+    fwd = icp(target, source, init, **kw)
+    if fwd is None:
+        return None
+    rev = icp(source, target, se2.inverse(np.asarray(init, float)), **kw)
+    if rev is None:
+        return fwd
+    back = se2.inverse(rev.mean)
+    mean = fwd.mean.copy()
+    mean[:2] = 0.5 * (fwd.mean[:2] + back[:2])
+    mean[2] = fwd.mean[2] + 0.5 * float(se2.wrap(back[2] - fwd.mean[2]))
+    return Measurement(mean, fwd.cov, fwd.info)
 
 
 # --------------------------------------------------------------------------- vp rotation
@@ -287,6 +311,8 @@ def robust_cost(
 
 FEATURE_MIN_DROW = 8.0  # px: a feature this close to the horizon row has no usable depth ratio
 FEATURE_MAX_Z = 2.0  # m: scan depth of the feature's wall beyond which the position is too coarse
+WALL_ROT_SD_MAX_DEG = 10.0  # a wall fit with a wider rotation sd is rejected (typical: 1; p99: 4)
+FEATURE_RATIO_TOL = (0.05, 0.10)  # m, relative: scan depth vs row-ratio depth in frame k must agree
 
 
 def wall_features(img: np.ndarray, seg, sift):
@@ -314,10 +340,17 @@ def match_features(f0, f1, matcher, ratio: float = 0.8) -> np.ndarray:
     return np.array([[*p0[m.queryIdx], *p1[m.trainIdx]] for m in good])
 
 
-def feature_points(matches: np.ndarray, scan_prev: ScanPoints, cam: sc.Camera | None = None):
+def feature_points(
+    matches: np.ndarray,
+    scan_prev: ScanPoints,
+    cam: sc.Camera | None = None,
+    scan_cur: ScanPoints | None = None,
+):
     """Metric ground-plane position of each matched feature in both frames (robot frames,
     forward/left). Frame k-1: the depth is the scan's wall depth in the feature's column. Frame
-    k: the feature keeps its height, so ``Z2 = Z1 * (v1 - cy) / (v2 - cy)``."""
+    k: with ``scan_cur`` the same (the scan's wall depth in the feature's column there); without
+    it the feature keeps its height, so ``Z2 = Z1 * (v1 - cy) / (v2 - cy)``. The ratio version
+    is biased (forward motion about 2.7 % short, stage 4b), the two-scan version is not."""
     cam = cam or sc.camera_config()
     if len(matches) == 0:
         return np.zeros((0, 2)), np.zeros((0, 2)), np.zeros(0)
@@ -332,9 +365,20 @@ def feature_points(matches: np.ndarray, scan_prev: ScanPoints, cam: sc.Camera | 
         & (np.abs(d0) >= FEATURE_MIN_DROW)
         & (np.abs(d1) >= FEATURE_MIN_DROW)
     )
-    ok &= d0 * d1 > 0
-    z1 = z0 * d0 / np.where(ok, d1, 1.0)
-    ok &= np.isfinite(z1) & (z1 > 0.05) & (z1 < 2.0 * FEATURE_MAX_Z)
+    if scan_cur is None:
+        ok &= d0 * d1 > 0
+        z1 = z0 * d0 / np.where(ok, d1, 1.0)
+        ok &= np.isfinite(z1) & (z1 > 0.05) & (z1 < 2.0 * FEATURE_MAX_Z)
+    else:
+        zcol1 = np.full(cam.width, np.nan)
+        zcol1[scan_cur.col] = scan_cur.xy[:, 0]
+        z1 = zcol1[np.clip(np.floor(u1).astype(int), 0, cam.width - 1)]
+        ok &= np.isfinite(z1) & (z1 > 0.05) & (z1 <= FEATURE_MAX_Z)
+        # the scan column in frame k can belong to another wall (a corner, a depth step, a large
+        # rotation): the row ratio, noisy and biased but local to the feature, vetoes those
+        ok &= d0 * d1 > 0
+        z1r = z0 * d0 / np.where(ok, d1, 1.0)
+        ok &= np.abs(z1 - z1r) <= FEATURE_RATIO_TOL[0] + FEATURE_RATIO_TOL[1] * z1
     p0 = np.stack([z0, -z0 * (u0 - cam.cx) / cam.fx], 1)[ok]
     p1 = np.stack([z1, -z1 * (u1 - cam.cx) / cam.fx], 1)[ok]
     return p0, p1, z0[ok]
@@ -353,12 +397,19 @@ def _rigid(a: np.ndarray, b: np.ndarray, w: np.ndarray | None = None):
 
 
 def wall_motion(
-    matches: np.ndarray, scan_prev: ScanPoints, seed: int = 0, cam=None
+    matches: np.ndarray,
+    scan_prev: ScanPoints,
+    seed: int = 0,
+    cam=None,
+    scan_cur: ScanPoints | None = None,
 ) -> Measurement | None:
     """Relative motion of frame k in frame k-1 from texture features on the walls, by RANSAC over
     two-point rigid fits then a weighted refit. Constrains motion along a corridor, where scan ICP
     cannot, whenever the walls carry texture. ``None`` with fewer than 6 inliers."""
-    a, b, z = feature_points(matches, scan_prev, cam)
+    a, b, z = feature_points(matches, scan_prev, cam, scan_cur)
+    # SIFT can return several keypoints (orientations) at one spot: count that spot once
+    _, keep = np.unique(np.round(np.c_[a, b] / 0.005).astype(int), axis=0, return_index=True)
+    a, b, z = a[np.sort(keep)], b[np.sort(keep)], z[np.sort(keep)]
     n = len(a)
     if n < 6:
         return None
@@ -366,6 +417,9 @@ def wall_motion(
     sig = np.sqrt(
         (0.003 + 0.5 * z**2 / (92 * 0.21)) ** 2 + (0.012 * z) ** 2
     )  # depth noise + ratio noise
+    if scan_cur is not None:  # both depths come from scans: two depth noises, no ratio noise
+        z1 = b[:, 0]
+        sig = np.hypot(0.003 + 0.5 * z**2 / (92 * 0.21), 0.003 + 0.5 * z1**2 / (92 * 0.21))
     best = None
     for _ in range(150):
         i, j = rng.choice(n, 2, replace=False)
@@ -398,6 +452,9 @@ def wall_motion(
     scale = max(1.0, float(np.mean(r[inl] ** 2))) * 1.5
     cov = scale * np.linalg.inv(H + np.diag([1e-6, 1e-6, 1e-6]))
     del Rm
+    if np.sqrt(cov[2, 2]) > np.radians(WALL_ROT_SD_MAX_DEG):
+        return None  # features at one place: the rotation is not measured (a fit like that
+        # still "agrees" with any rotation source at its width)
     return Measurement(
         np.array([t[0], t[1], float(th)]), cov, {"inliers": int(inl.sum()), "matches": int(n)}
     )

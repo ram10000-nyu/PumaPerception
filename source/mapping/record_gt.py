@@ -33,10 +33,38 @@ CAPTURE_EVERY = 5
 ROUTES = 3
 
 
+class HoldoutError(RuntimeError):
+    """A holdout seed was requested outside the final evaluation."""
+
+
+_FINAL = False
+
+
+def holdout_seeds() -> list[int]:
+    return list(json.loads(SEEDS.read_text()).get("holdout", []))
+
+
+def allow_final() -> None:
+    """Called by an evaluation script given ``--final`` (the end of stage 8); until then
+    ``gt_dir`` refuses the holdout seeds (plan rule 4)."""
+    global _FINAL
+    _FINAL = True
+
+
+def _path(seed: int, dest: str | Path, prefix: str) -> Path:
+    return Path(dest) / f"{prefix}-{seed}"
+
+
 def gt_dir(seed: int, dest: str | Path = ROOT / "data", prefix: str = "gt") -> Path:
     """``data/gt-<seed>`` (the official ``msaa=1`` recording) or ``data/gt4-<seed>`` (same
-    seed, routes and noise, rendered with the server's ``msaa=4``)."""
-    return Path(dest) / f"{prefix}-{seed}"
+    seed, routes and noise, rendered with the server's ``msaa=4``). Holdout seeds are refused
+    unless the script was started with ``--final`` (``allow_final``)."""
+    if int(seed) in holdout_seeds() and not _FINAL:
+        raise HoldoutError(
+            f"seed {seed} is a holdout seed: it is opened once, by the final evaluation "
+            "(pass --final); see rule 4 of the plan"
+        )
+    return _path(seed, dest, prefix)
 
 
 def make_world(seed: int, textures: sim.Textures | None = None, msaa: int = 1) -> sim.Simulator:
@@ -49,7 +77,7 @@ def make_world(seed: int, textures: sim.Textures | None = None, msaa: int = 1) -
 
 
 def record(seed: int, dest: str | Path = ROOT / "data", textures=None, msaa: int = 1) -> Path:
-    path = gt_dir(seed, dest, "gt4" if msaa == 4 else "gt")
+    path = _path(seed, dest, "gt4" if msaa == 4 else "gt")
     world = make_world(seed, textures, msaa)
     summary = world.record(
         path, routes=ROUTES, seed=seed, capture_every=CAPTURE_EVERY, student_files=False
@@ -63,6 +91,82 @@ def record(seed: int, dest: str | Path = ROOT / "data", textures=None, msaa: int
         "camera": world.camera,
         "maze_sha256": world.maze_sha256,
         "summary": summary,
+    }
+    (path / "gt.json").write_text(json.dumps(meta, indent=1))
+    return path
+
+
+def record_ticks(
+    seed: int,
+    capture_every: int,
+    dest: str | Path = ROOT / "data",
+    textures=None,
+    msaa: int = 4,
+) -> Path:
+    """Stage 9: the same maze, routes and noise as ``record`` but one frame every
+    ``capture_every`` ticks, in ``data/tick<N>-<seed>``. With ``capture_every=1`` this is the
+    format of a challenge download. The driving does not depend on ``capture_every``
+    (stage 0), so frame ``N * j + c`` of a per-tick recording is frame ``j`` of the 5-tick one."""
+    if seed in holdout_seeds():
+        raise HoldoutError(f"seed {seed} is a holdout seed")
+    path = _path(seed, dest, f"tick{capture_every}")
+    world = make_world(seed, textures, msaa)
+    summary = world.record(
+        path, routes=ROUTES, seed=seed, capture_every=capture_every, student_files=False
+    )
+    meta = {
+        "seed": seed,
+        "spawn": world.spawn,
+        "target": world.target,
+        "cell_size": world.cell_size,
+        "grid": world.grid,
+        "camera": world.camera,
+        "maze_sha256": world.maze_sha256,
+        "summary": summary,
+        "capture_every": capture_every,
+    }
+    (path / "gt.json").write_text(json.dumps(meta, indent=1))
+    return path
+
+
+def record_biased(
+    seed: int,
+    motion_bias: tuple[float, float, float],
+    motion_seed: int,
+    dest: str | Path = ROOT / "data",
+    textures=None,
+    msaa: int = 4,
+) -> Path:
+    """Stage 4b: the same maze and routes as ``record`` but a run with a systematic motion bias
+    (``Simulator(motion_bias=...)``, drawn once from ``motion_seed``), in ``data/bias-<seed>``.
+    Holdout seeds are refused. ``gt.json`` also stores the drawn bias (evaluation only)."""
+    if seed in holdout_seeds():
+        raise HoldoutError(f"seed {seed} is a holdout seed")
+    textures = textures or sim.Textures.find()
+    world = sim.Simulator(
+        textures,
+        seed,
+        motion_noise=sim.DEFAULT_NOISE,
+        motion_bias=motion_bias,
+        motion_seed=motion_seed,
+        msaa=msaa,
+    )
+    path = _path(seed, dest, "bias")
+    summary = world.record(
+        path, routes=ROUTES, seed=seed, capture_every=CAPTURE_EVERY, student_files=False
+    )
+    meta = {
+        "seed": seed,
+        "spawn": world.spawn,
+        "target": world.target,
+        "cell_size": world.cell_size,
+        "grid": world.grid,
+        "camera": world.camera,
+        "maze_sha256": world.maze_sha256,
+        "summary": summary,
+        "motion_bias_sigmas": list(motion_bias),
+        "motion_seed": motion_seed,
+        "drawn_bias": list(world.drawn_bias()),
     }
     (path / "gt.json").write_text(json.dumps(meta, indent=1))
     return path
@@ -108,9 +212,10 @@ def check_pose_alignment(seed: int, gt: Path, textures, n: int = 20) -> dict:
 
 
 def check_gt4_matches_gt(seed: int, dest: str | Path = ROOT / "data") -> dict:
-    """The ``msaa=4`` recording must differ from the ``msaa=1`` one only in rendering: identical
-    ``poses.json``, ``data_info.json`` and ``gt.json`` (minus the image encoding), same frames."""
-    a, b = gt_dir(seed, dest, "gt"), gt_dir(seed, dest, "gt4")
+    """Byte-level comparison only (no frame or pose is decoded or inspected). The ``msaa=4``
+    recording must differ from the ``msaa=1`` one only in rendering: identical ``poses.json``,
+    ``data_info.json`` and ``gt.json`` (minus the image encoding), same frames."""
+    a, b = _path(seed, dest, "gt"), _path(seed, dest, "gt4")
     out = {"same_poses": True, "same_data_info": True, "same_frame_count": True}
     for i in range(ROUTES):
         out["same_poses"] &= (a / f"traj_{i}" / "poses.json").read_bytes() == (
@@ -133,7 +238,30 @@ def main() -> None:
     p.add_argument("--verify", action="store_true", help="run the stage 0 equivalence checks")
     p.add_argument("--dest", default=str(ROOT / "data"))
     p.add_argument("--msaa", type=int, default=1, choices=[1, 4], help="4: the server's rendering")
+    p.add_argument("--motion-bias", type=float, nargs=3, help="record data/bias-<seed> (4b)")
+    p.add_argument("--motion-seed", type=int, default=0)
+    p.add_argument(
+        "--capture-every",
+        type=int,
+        default=CAPTURE_EVERY,
+        help="ticks per saved frame (default 5: the existing recordings); other values write "
+        "data/tick<N>-<seed> (stage 9: 1 is the format of a challenge download)",
+    )
     args = p.parse_args()
+    if args.capture_every != CAPTURE_EVERY:
+        textures = sim.Textures.find()
+        for seed in args.seeds or []:
+            path = record_ticks(seed, args.capture_every, args.dest, textures, msaa=args.msaa)
+            frames = json.loads((path / "gt.json").read_text())["summary"]["frames"]
+            print(f"seed {seed}: {frames} frames, one per {args.capture_every} tick(s) -> {path}")
+        return
+    if args.motion_bias:
+        for seed in args.seeds or []:
+            bias = tuple(args.motion_bias)
+            path = record_biased(seed, bias, args.motion_seed, args.dest, msaa=args.msaa)
+            drawn = json.loads((path / "gt.json").read_text())["drawn_bias"]
+            print(f"seed {seed}: biased run {drawn} -> {path}")
+        return
     seeds = args.seeds
     if not seeds:
         cfg = json.loads(SEEDS.read_text())
@@ -143,11 +271,15 @@ def main() -> None:
         path = record(seed, args.dest, textures, args.msaa)
         meta = json.loads((path / "gt.json").read_text())
         print(f"seed {seed}: {meta['summary']['frames']} frames -> {path}")
+        held = seed in holdout_seeds()
         if args.verify and args.msaa == 4:
             print("  gt4 vs gt:", check_gt4_matches_gt(seed, args.dest))
         elif args.verify:
             print("  student-equal:", check_matches_student(seed, path, textures))
-            print("  pose alignment:", check_pose_alignment(seed, path, textures))
+            if held:  # decodes frames: not before the final evaluation
+                print("  pose alignment: skipped (holdout)")
+            else:
+                print("  pose alignment:", check_pose_alignment(seed, path, textures))
 
 
 if __name__ == "__main__":
