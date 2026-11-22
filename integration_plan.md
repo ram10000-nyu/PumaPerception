@@ -93,6 +93,13 @@ class Planner:
 | M7 | challenge `70594c50463a` | both | only after M5/M6 and an explicit go-ahead |
 
 ## 6. Git
-- One repo (`puma` remote), **two branches**: Rolando's is **`auto-ping`** (tracker, map at scale); the partner has his own. The partner merges into `master` and tests the combined agent.
+- One repo (`puma` remote), **two branches**: Rolando's is **`auto-ping`** (tracker, map at scale); the partner works on his own branch. The partner merges into `master` and tests the combined agent.
+- **Partner, before merging anything: create your own branch first** (never work or test merges directly on `master`):
+  ```
+  git fetch puma
+  git checkout -b <your-branch> puma/master     # e.g. planner
+  git push -u puma <your-branch>
+  ```
+  Develop there; to integrate, merge `auto-ping` into **your branch** (`git merge puma/auto-ping`), test the combined agent locally, then merge your branch into `master`.
 - Changes to `source/interface.py` are agreed by both before merging.
 - Never commit `.env`, `data/`, caches (except the three parameter files) or `.DS_Store`.

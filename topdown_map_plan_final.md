@@ -7,6 +7,7 @@
 - **Rolando (branch `auto-ping`, plan `auto_ping_plan.md`):** the map at the final's size, and **live localization** — keep the robot's pose on the map updated while it drives, without stopping for a 360 degree ping.
 - **Partner (his own branch and notes; merges and tests):** the automated planning agent (path planning, control, check-in). It consumes the outputs defined in Part D.
 - **How the two parts fit together:** `integration_plan.md` (split, interface summary, call order, milestones, git workflow).
+- **Branches:** `master` (shared, merged by the partner), `auto-ping` (Rolando), and the partner's own branch. **Partner: create your branch from `master` before merging anything** (`git fetch puma && git checkout -b <your-branch> puma/master && git push -u puma <your-branch>`); merge `auto-ping` into it, test, then merge into `master`. Details: `integration_plan.md`, section 6.
 
 **Final maze size:** not announced; likely **41 x 41 or 51 x 51** grid cells (the midterm was 31 x 31). Plan for 51 x 51.
 **Final challenge id:** `70594c50463a` (`VIS_NAV_CHALLENGE` in `.env`, set 2026-11-21). One maze per challenge id: its exploration data and goal are fixed. **Do not start a session or download its data without the user's go-ahead.**
